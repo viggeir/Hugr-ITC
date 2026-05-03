@@ -263,6 +263,7 @@ class AudioEngine(QObject):
     speech_start   = Signal()             # user started speaking
     speech_end     = Signal()             # user stopped speaking
     ambient_ready  = Signal(np.ndarray)   # accumulated ambient FFT ready
+    speech_chunk_ready = Signal(np.ndarray)  # captured spoken audio for transcription
 
     def __init__(self):
         super().__init__()
@@ -289,6 +290,7 @@ class AudioEngine(QObject):
         # Ambient emission timer (emit ambient FFT every N seconds when silent)
         self._ambient_counter = 0
         self._ambient_emit_every = int(SAMPLE_RATE * AMBIENT_WINDOW / BLOCK_SIZE)
+        self._speech_buf = []
 
     def set_noise_volume(self, v):
         with self._lock:
@@ -342,6 +344,7 @@ class AudioEngine(QObject):
         if currently_speaking and not self._is_speaking:
             self._is_speaking   = True
             self._silence_since = None
+            self._speech_buf = []
             self.speech_start.emit()
 
         elif not currently_speaking and self._is_speaking:
@@ -350,10 +353,15 @@ class AudioEngine(QObject):
             elif time.time() - self._silence_since > SILENCE_HOLD:
                 self._is_speaking   = False
                 self._silence_since = None
+                if self._speech_buf:
+                    self.speech_chunk_ready.emit(np.array(self._speech_buf, dtype=np.float32))
                 self.speech_end.emit()
 
         elif not currently_speaking and not self._is_speaking:
             self._silence_since = None
+
+        if self._is_speaking:
+            self._speech_buf.extend(mic_raw.tolist())
 
         # ── Ambient buffer (only when not speaking) ──
         if not self._is_speaking:
@@ -514,18 +522,17 @@ class SpeechWorker(QObject):
             grammar.DictationSetState(1)
 
             # Wire up event handler
+            speech_signal = self.text_ready
+
             class RecoHandler:
-                def __init__(self, signal):
-                    self.signal = signal
-                def OnRecognition(self, stream_num, result_obj):
+                def OnRecognition(self, stream_num, stream_pos, rec_type, result_obj):
                     try:
                         phrase = result_obj.PhraseInfo.GetText()
                         if phrase and phrase.strip():
-                            self.signal.emit(phrase.strip())
+                            speech_signal.emit(phrase.strip())
                     except Exception:
                         pass
 
-            handler = RecoHandler(self.text_ready)
             context_events = win32com.client.WithEvents(context, RecoHandler)
 
             while self._running:
@@ -780,6 +787,7 @@ class HugrWindow(QMainWindow):
         self._audio.speech_start.connect(self._on_speech_start)
         self._audio.speech_end.connect(self._on_speech_end)
         self._audio.ambient_ready.connect(self._on_ambient)
+        self._audio.speech_chunk_ready.connect(self._on_speech_chunk)
 
         self._speech  = SpeechWorker()
         self._speech.text_ready.connect(self._on_transcription)
@@ -1074,6 +1082,20 @@ class HugrWindow(QMainWindow):
             return
         self._add_bubble(text, "", is_response=False)
 
+    def _on_speech_chunk(self, samples):
+        if not self._session_active:
+            return
+        try:
+            import speech_recognition as sr
+            recogniser = sr.Recognizer()
+            audio_bytes = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+            audio = sr.AudioData(audio_bytes, SAMPLE_RATE, 2)
+            text = recogniser.recognize_google(audio)
+            if text and text.strip():
+                self._add_bubble(text.strip(), "", is_response=False)
+        except Exception:
+            pass
+
     def _on_speech_available(self, ok):
         if not ok:
             self._speech_lbl.setText(
@@ -1098,6 +1120,7 @@ class HugrWindow(QMainWindow):
     def _scroll_bottom(self):
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
+
 
     # ── Cleanup ───────────────────────────────
 
