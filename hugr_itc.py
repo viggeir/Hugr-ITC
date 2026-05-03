@@ -514,18 +514,17 @@ class SpeechWorker(QObject):
             grammar.DictationSetState(1)
 
             # Wire up event handler
+            speech_signal = self.text_ready
+
             class RecoHandler:
-                def __init__(self, signal):
-                    self.signal = signal
-                def OnRecognition(self, stream_num, result_obj):
+                def OnRecognition(self, stream_num, stream_pos, rec_type, result_obj):
                     try:
                         phrase = result_obj.PhraseInfo.GetText()
                         if phrase and phrase.strip():
-                            self.signal.emit(phrase.strip())
+                            speech_signal.emit(phrase.strip())
                     except Exception:
                         pass
 
-            handler = RecoHandler(self.text_ready)
             context_events = win32com.client.WithEvents(context, RecoHandler)
 
             while self._running:
@@ -1098,6 +1097,7 @@ class HugrWindow(QMainWindow):
     def _scroll_bottom(self):
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
+
 
     # ── Cleanup ───────────────────────────────
 
